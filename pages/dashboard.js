@@ -159,34 +159,50 @@ export default function Dashboard() {
   }
 
   const loadAll = useCallback(async (s) => {
-    // Profile
-    apiFetch(`/api/gym/profile?exerciserUuid=${s.exerciserUuid}`)
-      .then(r => setResult('profile', r))
+    // 1. Profile first — it carries companyUuid + homeClub which login doesn't always return
+    const profileResult = await apiFetch(`/api/gym/profile?exerciserUuid=${s.exerciserUuid}`)
+    setResult('profile', profileResult)
 
-    // Classes today
-    if (s.companyUuid) {
-      const clubQ = s.homeClub?.clubUuid ? `&clubUuid=${s.homeClub.clubUuid}` : ''
-      apiFetch(`/api/gym/classes?companyUuid=${s.companyUuid}&exerciserUuid=${s.exerciserUuid}${clubQ}`)
+    // 2. Extract the missing fields from profile, try every known nesting
+    const pd = profileResult.data
+    const ex = pd?.exerciser || pd || {}
+    const hc = ex.homeClub || ex.club || {}
+
+    const enriched = {
+      ...s,
+      firstName: s.firstName || ex.firstName,
+      companyUuid: s.companyUuid || ex.companyUuid,
+      homeClub: {
+        name:          s.homeClub?.name         || hc.name,
+        clubUuid:      s.homeClub?.clubUuid      || hc.clubUuid || hc.uuid,
+        gymLocationId: s.homeClub?.gymLocationId || hc.gymLocationId || hc.locationUuid || hc.id,
+      },
+    }
+
+    // Persist enriched data so refreshes don't need to re-derive
+    localStorage.setItem('gym_session', JSON.stringify(enriched))
+    setSession(enriched)
+
+    // 3. Fire the rest in parallel now that we have the UUIDs
+    apiFetch(`/api/gym/schedule?exerciserUuid=${enriched.exerciserUuid}`)
+      .then(r => setResult('schedule', r))
+    apiFetch(`/api/gym/checkins?exerciserUuid=${enriched.exerciserUuid}`)
+      .then(r => setResult('checkins', r))
+
+    if (enriched.companyUuid) {
+      const clubQ = enriched.homeClub?.clubUuid ? `&clubUuid=${enriched.homeClub.clubUuid}` : ''
+      apiFetch(`/api/gym/classes?companyUuid=${enriched.companyUuid}&exerciserUuid=${enriched.exerciserUuid}${clubQ}`)
         .then(r => setResult('classes', r))
     } else {
-      setResult('classes', { ok: false, status: 0, data: { error: 'No companyUuid in session — check raw login response' } })
+      setResult('classes', { ok: false, status: 0, data: { error: `companyUuid not found in profile response — raw: ${JSON.stringify(pd).slice(0, 200)}` } })
     }
 
-    // My bookings
-    apiFetch(`/api/gym/schedule?exerciserUuid=${s.exerciserUuid}`)
-      .then(r => setResult('schedule', r))
-
-    // Busyness
-    if (s.homeClub?.gymLocationId) {
-      apiFetch(`/api/gym/busyness?exerciserUuid=${s.exerciserUuid}&gymLocationId=${s.homeClub.gymLocationId}`)
+    if (enriched.homeClub?.gymLocationId) {
+      apiFetch(`/api/gym/busyness?exerciserUuid=${enriched.exerciserUuid}&gymLocationId=${enriched.homeClub.gymLocationId}`)
         .then(r => setResult('busyness', r))
     } else {
-      setResult('busyness', { ok: false, status: 0, data: { error: 'No gymLocationId in session — check raw login response' } })
+      setResult('busyness', { ok: false, status: 0, data: { error: `gymLocationId not found in profile response — raw: ${JSON.stringify(hc).slice(0, 200)}` } })
     }
-
-    // Check-ins
-    apiFetch(`/api/gym/checkins?exerciserUuid=${s.exerciserUuid}`)
-      .then(r => setResult('checkins', r))
   }, [])
 
   useEffect(() => {
