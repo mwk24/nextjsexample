@@ -12,338 +12,334 @@ const BORDER = '#2a2a2a'
 function toArr(x) {
   if (Array.isArray(x)) return x
   if (!x) return []
-  // common wrappers
-  for (const key of ['classes', 'schedule', 'checkIns', 'checkins', 'items', 'content', 'data']) {
+  for (const key of ['classes', 'schedule', 'checkIns', 'checkins', 'items', 'content', 'data', 'results']) {
     if (Array.isArray(x[key])) return x[key]
   }
   return []
 }
 
-function fmtTime(epochMs) {
-  if (!epochMs) return ''
-  return new Date(epochMs).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
+function fmtTime(v) {
+  if (!v) return '?'
+  const d = typeof v === 'number' ? new Date(v) : new Date(v)
+  if (isNaN(d)) return String(v)
+  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
 }
 
-function fmtDate(epochMs) {
-  if (!epochMs) return ''
-  return new Date(epochMs).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
+function fmtDate(v) {
+  if (!v) return '?'
+  const d = typeof v === 'number' ? new Date(v) : new Date(v)
+  if (isNaN(d)) return String(v)
+  return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
 }
 
+// Fetch with full status + error details
 async function apiFetch(path) {
   const res = await fetch(path)
-  const data = await res.json()
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
-  return data
+  const text = await res.text()
+  let data
+  try { data = JSON.parse(text) } catch { data = { _raw: text } }
+  return { ok: res.ok, status: res.status, data }
 }
 
-// ─── sub-components ─────────────────────────────────────────────────────────
+// ─── status dot ─────────────────────────────────────────────────────────────
 
-function BusynessCard({ data, error }) {
-  if (error) return <InfoCard title="Gym Busyness" error={error} />
-  if (!data) return <InfoCard title="Gym Busyness" loading />
+function Dot({ state }) {
+  const color = state === 'ok' ? '#4ade80' : state === 'error' ? '#f87171' : state === 'loading' ? '#f59e0b' : '#555'
+  return <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: color, marginRight: 6 }} />
+}
 
-  const pct = data.busynessPercentage ?? data.occupancyPercentage ?? data.percentage ?? null
-  const label = data.busynessLabel || data.label || ''
-  const count = data.currentCount ?? data.occupancy ?? null
+// ─── section wrapper ────────────────────────────────────────────────────────
 
+function Section({ title, state, error, children, raw }) {
+  const [showRaw, setShowRaw] = useState(false)
   return (
-    <div style={sc.busynessCard}>
-      <div style={sc.busynessTitle}>Gym Busyness — right now</div>
-      {pct != null ? (
-        <>
-          <div style={sc.busynessPct}>{Math.round(pct)}%</div>
-          <div style={sc.busynessBar}>
-            <div style={{ ...sc.busynessFill, width: `${Math.min(pct, 100)}%`, background: pct > 80 ? RED : pct > 50 ? '#f59e0b' : '#22c55e' }} />
-          </div>
-          {label && <div style={sc.busynessLabel}>{label}</div>}
-          {count != null && <div style={sc.busynessLabel}>{count} people in gym</div>}
-        </>
-      ) : (
-        <pre style={sc.rawJson}>{JSON.stringify(data, null, 2)}</pre>
-      )}
+    <div style={sc.section}>
+      <div style={sc.sectionHead}>
+        <span><Dot state={state} /><span style={sc.sectionTitle}>{title}</span></span>
+        {raw && (
+          <button style={sc.rawBtn} onClick={() => setShowRaw(v => !v)}>
+            {showRaw ? 'hide raw' : 'raw'}
+          </button>
+        )}
+      </div>
+      {state === 'loading' && <div style={sc.muted}>Loading…</div>}
+      {state === 'error' && <div style={sc.errorText}>{error}</div>}
+      {state === 'ok' && children}
+      {showRaw && raw && <pre style={sc.pre}>{JSON.stringify(raw, null, 2)}</pre>}
     </div>
   )
 }
 
-function ClassCard({ cls, companyUuid, exerciserUuid, onBooked }) {
+// ─── busyness ───────────────────────────────────────────────────────────────
+
+function BusynessSection({ result }) {
+  const state = !result ? 'loading' : result.ok ? 'ok' : 'error'
+  const d = result?.data
+
+  const pct = d?.busynessPercentage ?? d?.occupancyPercentage ?? d?.percentage ?? d?.currentOccupancy ?? null
+  const label = d?.busynessLabel || d?.label || d?.status || ''
+  const count = d?.currentCount ?? d?.occupancy ?? d?.currentOccupancy ?? null
+
+  return (
+    <Section title="Gym Busyness" state={state} error={result?.data?.error || `HTTP ${result?.status}`} raw={d}>
+      {pct != null ? (
+        <>
+          <div style={sc.pctNum}>{Math.round(pct)}%</div>
+          <div style={sc.bar}><div style={{ ...sc.barFill, width: `${Math.min(pct, 100)}%`, background: pct > 80 ? RED : pct > 50 ? '#f59e0b' : '#4ade80' }} /></div>
+          {label && <div style={sc.muted}>{label}</div>}
+          {count != null && <div style={sc.muted}>{count} people currently</div>}
+        </>
+      ) : (
+        <div style={sc.muted}>Data received but no busyness % found — check raw response.</div>
+      )}
+    </Section>
+  )
+}
+
+// ─── classes ────────────────────────────────────────────────────────────────
+
+function ClassRow({ cls, companyUuid, exerciserUuid, onRefresh }) {
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState(null)
 
-  const booked = cls.bookingStatus === 'BOOKED' || cls.isBooked || cls.exerciserBooked
-  const full = cls.spotsAvailable === 0 || cls.spotsAvailable === '0'
+  const booked = cls.bookingStatus === 'BOOKED' || cls.isBooked || cls.exerciserBooked || cls.booked
   const classUuid = cls.classUuid || cls.uuid || cls.id
+  const name = cls.className || cls.name || cls.title || 'Class'
+  const instructor = cls.instructorName || cls.instructor?.name || cls.instructorFirstName || ''
+  const startV = cls.startDateTime || cls.startDate || cls.start
+  const endV = cls.endDateTime || cls.endDate || cls.end
+  const spots = cls.spotsAvailable ?? cls.availableSpots ?? cls.freeSpots ?? null
+  const full = spots === 0
 
   async function handleBook() {
-    setBusy(true)
-    setMsg(null)
+    setBusy(true); setMsg(null)
     try {
       const res = await fetch('/api/gym/book', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          companyUuid,
-          classUuid,
-          exerciserUuid,
-          action: booked ? 'cancel' : 'book',
-        }),
+        body: JSON.stringify({ companyUuid, classUuid, exerciserUuid, action: booked ? 'cancel' : 'book' }),
       })
       const data = await res.json()
-      if (res.ok) {
-        setMsg(booked ? 'Cancelled' : 'Booked!')
-        if (onBooked) onBooked()
-      } else {
-        setMsg(data.error || 'Failed')
-      }
-    } catch {
-      setMsg('Error')
-    } finally {
-      setBusy(false)
-    }
+      setMsg(res.ok ? (booked ? 'Cancelled' : 'Booked!') : (data.error || `Error ${res.status}`))
+      if (res.ok && onRefresh) onRefresh()
+    } catch { setMsg('Network error') }
+    finally { setBusy(false) }
   }
 
-  const name = cls.className || cls.name || cls.title || 'Class'
-  const instructor = cls.instructorName || cls.instructor?.name || ''
-  const startMs = cls.startDateTime || cls.startDate || cls.start
-  const endMs = cls.endDateTime || cls.endDate || cls.end
-  const spots = cls.spotsAvailable ?? cls.availableSpots ?? null
-
   return (
-    <div style={{ ...sc.classCard, borderLeft: booked ? `3px solid ${RED}` : '3px solid transparent' }}>
-      <div style={sc.classTime}>{fmtTime(startMs)}{endMs ? ` – ${fmtTime(endMs)}` : ''}</div>
+    <div style={{ ...sc.classRow, borderLeft: booked ? `3px solid ${RED}` : '3px solid transparent' }}>
+      <div style={sc.classTime}>{fmtTime(startV)}{endV ? ` – ${fmtTime(endV)}` : ''}</div>
       <div style={sc.className}>{name}</div>
-      {instructor && <div style={sc.classInstructor}>{instructor}</div>}
-      <div style={sc.classRow}>
-        {spots != null && (
-          <span style={{ ...sc.badge, background: spots === 0 ? '#3a1c1c' : '#1c2a1c', color: spots === 0 ? '#f87171' : '#4ade80' }}>
-            {spots === 0 ? 'Full' : `${spots} spots`}
-          </span>
-        )}
+      {instructor && <div style={sc.classSub}>{instructor}</div>}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginTop: 6 }}>
+        {spots != null && <span style={{ ...sc.badge, background: full ? '#3a1c1c' : '#1c2a1c', color: full ? '#f87171' : '#4ade80' }}>{full ? 'Full' : `${spots} spots`}</span>}
         {booked && <span style={{ ...sc.badge, background: '#1a1f3a', color: '#818cf8' }}>Booked</span>}
         {classUuid && companyUuid && exerciserUuid && (
           <button
-            style={{ ...sc.bookBtn, ...(busy ? { opacity: 0.6 } : {}), ...(booked ? sc.cancelBtn : {}) }}
-            onClick={handleBook}
-            disabled={busy || (!booked && full)}
-          >
-            {busy ? '…' : booked ? 'Cancel' : full ? 'Full' : 'Book'}
-          </button>
+            style={{ ...sc.bookBtn, marginLeft: 'auto', ...(booked ? { background: '#2a1a1a', color: '#f87171' } : {}), ...(busy ? { opacity: 0.5 } : {}) }}
+            onClick={handleBook} disabled={busy || (!booked && full)}
+          >{busy ? '…' : booked ? 'Cancel' : full ? 'Full' : 'Book'}</button>
         )}
       </div>
-      {msg && <div style={{ fontSize: 12, color: msg === 'Booked!' ? '#4ade80' : '#f87171', marginTop: 4 }}>{msg}</div>}
+      {msg && <div style={{ fontSize: 12, marginTop: 4, color: msg.includes('!') || msg === 'Cancelled' ? '#4ade80' : '#f87171' }}>{msg}</div>}
     </div>
   )
 }
 
-function InfoCard({ title, loading, error, children }) {
-  return (
-    <div style={sc.infoCard}>
-      <div style={sc.cardTitle}>{title}</div>
-      {loading && <div style={sc.muted}>Loading…</div>}
-      {error && <div style={sc.errorText}>{error}</div>}
-      {children}
-    </div>
-  )
-}
-
-// ─── main dashboard ──────────────────────────────────────────────────────────
+// ─── main ────────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
   const router = useRouter()
   const [session, setSession] = useState(null)
-  const [profile, setProfile] = useState(null)
-  const [classes, setClasses] = useState(null)
-  const [schedule, setSchedule] = useState(null)
-  const [busyness, setBusyness] = useState(null)
-  const [checkins, setCheckins] = useState(null)
-  const [rawData, setRawData] = useState({})
-  const [errors, setErrors] = useState({})
+  const [results, setResults] = useState({}) // { profile, classes, schedule, busyness, checkins }
   const [tab, setTab] = useState('classes')
-  const [initDone, setInitDone] = useState(false)
 
-  function setErr(key, msg) {
-    setErrors(e => ({ ...e, [key]: msg }))
-  }
-  function setRaw(key, val) {
-    setRawData(r => ({ ...r, [key]: val }))
+  function setResult(key, val) {
+    setResults(r => ({ ...r, [key]: val }))
   }
 
   const loadAll = useCallback(async (s) => {
     // Profile
     apiFetch(`/api/gym/profile?exerciserUuid=${s.exerciserUuid}`)
-      .then(d => { setProfile(d.exerciser || d); setRaw('profile', d) })
-      .catch(e => setErr('profile', e.message))
+      .then(r => setResult('profile', r))
 
-    // Classes today (needs companyUuid)
+    // Classes today
     if (s.companyUuid) {
       const clubQ = s.homeClub?.clubUuid ? `&clubUuid=${s.homeClub.clubUuid}` : ''
       apiFetch(`/api/gym/classes?companyUuid=${s.companyUuid}&exerciserUuid=${s.exerciserUuid}${clubQ}`)
-        .then(d => { setClasses(toArr(d)); setRaw('classes', d) })
-        .catch(e => setErr('classes', e.message))
+        .then(r => setResult('classes', r))
+    } else {
+      setResult('classes', { ok: false, status: 0, data: { error: 'No companyUuid in session — check raw login response' } })
     }
 
-    // Booked schedule (next 7 days)
+    // My bookings
     apiFetch(`/api/gym/schedule?exerciserUuid=${s.exerciserUuid}`)
-      .then(d => { setSchedule(toArr(d)); setRaw('schedule', d) })
-      .catch(e => setErr('schedule', e.message))
+      .then(r => setResult('schedule', r))
 
-    // Busyness (needs gymLocationId from homeClub)
+    // Busyness
     if (s.homeClub?.gymLocationId) {
       apiFetch(`/api/gym/busyness?exerciserUuid=${s.exerciserUuid}&gymLocationId=${s.homeClub.gymLocationId}`)
-        .then(d => { setBusyness(d); setRaw('busyness', d) })
-        .catch(e => setErr('busyness', e.message))
+        .then(r => setResult('busyness', r))
+    } else {
+      setResult('busyness', { ok: false, status: 0, data: { error: 'No gymLocationId in session — check raw login response' } })
     }
 
-    // Check-in history (last 30 days)
+    // Check-ins
     apiFetch(`/api/gym/checkins?exerciserUuid=${s.exerciserUuid}`)
-      .then(d => { setCheckins(toArr(d)); setRaw('checkins', d) })
-      .catch(e => setErr('checkins', e.message))
+      .then(r => setResult('checkins', r))
   }, [])
 
   useEffect(() => {
     const raw = localStorage.getItem('gym_session')
     if (!raw) { router.push('/'); return }
     const s = JSON.parse(raw)
+    if (!s?.exerciserUuid) { router.push('/'); return }
     setSession(s)
-    loadAll(s).finally(() => setInitDone(true))
+    loadAll(s)
   }, [])
-
-  function logout() {
-    localStorage.removeItem('gym_session')
-    router.push('/')
-  }
 
   if (!session) return null
 
-  const displayName = profile?.firstName || session.firstName || 'Member'
-  const homeClubName = profile?.homeClub?.name || session.homeClub?.name || 'Home gym'
-  const companyUuid = session.companyUuid || profile?.companyUuid
+  const profile = results.profile?.data
+  const displayName = profile?.exerciser?.firstName || profile?.firstName || session.firstName || 'Member'
+  const homeClubName = profile?.exerciser?.homeClub?.name || profile?.homeClub?.name || session.homeClub?.name || '—'
+  const companyUuid = session.companyUuid || profile?.exerciser?.companyUuid || profile?.companyUuid
+
+  const classes = toArr(results.classes?.data)
+  const schedule = toArr(results.schedule?.data)
+  const checkins = toArr(results.checkins?.data)
 
   return (
     <div style={sc.page}>
       <Head><title>Gym Group Dashboard</title></Head>
 
-      {/* ── Header ── */}
       <header style={sc.header}>
-        <div style={sc.headerInner}>
-          <div style={sc.brandRow}>
-            <span style={sc.brandBar} />
-            <span style={sc.brandName}>THE GYM GROUP</span>
-          </div>
-          <div style={sc.homeClub}>{homeClubName}</div>
+        <div>
+          <div style={sc.brand}><span style={sc.brandBar} />THE GYM GROUP</div>
+          <div style={sc.sub}>{homeClubName}</div>
         </div>
-        <div style={sc.headerRight}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
           <span style={sc.greeting}>Hi, {displayName}</span>
-          <button style={sc.logoutBtn} onClick={logout}>Sign out</button>
+          <button style={sc.logoutBtn} onClick={() => { localStorage.clear(); router.push('/') }}>Sign out</button>
         </div>
       </header>
 
       <main style={sc.main}>
-        {/* ── Busyness ── */}
-        <BusynessCard data={busyness} error={errors.busyness} />
 
-        {/* ── Tab bar ── */}
+        {/* ── Session diagnostic (always visible, collapsible) ── */}
+        <details style={sc.diagCard} open={!session.companyUuid || !session.homeClub?.gymLocationId}>
+          <summary style={sc.diagSummary}>
+            Session
+            {!session.exerciserUuid && ' ⚠ no exerciserUuid'}
+            {!session.companyUuid && ' ⚠ no companyUuid'}
+            {!session.homeClub?.gymLocationId && ' ⚠ no gymLocationId'}
+          </summary>
+          <div style={sc.diagGrid}>
+            {[
+              ['exerciserUuid', session.exerciserUuid],
+              ['companyUuid', session.companyUuid],
+              ['homeClub.name', session.homeClub?.name],
+              ['homeClub.clubUuid', session.homeClub?.clubUuid],
+              ['homeClub.gymLocationId', session.homeClub?.gymLocationId],
+            ].map(([k, v]) => (
+              <div key={k} style={sc.diagRow}>
+                <span style={sc.diagKey}>{k}</span>
+                <span style={{ ...sc.diagVal, color: v ? '#4ade80' : '#f87171' }}>{v || 'null'}</span>
+              </div>
+            ))}
+          </div>
+          {localStorage.getItem('gym_raw_login') && (
+            <details style={{ marginTop: 8 }}>
+              <summary style={{ color: '#555', fontSize: 11, cursor: 'pointer' }}>Raw login response</summary>
+              <pre style={sc.pre}>{localStorage.getItem('gym_raw_login')}</pre>
+            </details>
+          )}
+        </details>
+
+        {/* ── Busyness ── */}
+        <BusynessSection result={results.busyness} />
+
+        {/* ── Tabs ── */}
         <div style={sc.tabBar}>
           {[
-            ['classes', 'Classes today'],
-            ['schedule', 'My bookings'],
-            ['checkins', 'Visits'],
-            ['debug', 'Raw API'],
+            ['classes', `Classes (${classes.length || '…'})`],
+            ['schedule', `Bookings (${schedule.length || '…'})`],
+            ['checkins', `Visits (${checkins.length || '…'})`],
           ].map(([key, label]) => (
-            <button
-              key={key}
-              style={{ ...sc.tabBtn, ...(tab === key ? sc.tabBtnActive : {}) }}
+            <button key={key}
+              style={{ ...sc.tabBtn, ...(tab === key ? sc.tabActive : {}) }}
               onClick={() => setTab(key)}
-            >
-              {label}
-            </button>
+            >{label}</button>
           ))}
         </div>
 
-        {/* ── Tab content ── */}
-        <div style={sc.tabContent}>
+        {tab === 'classes' && (
+          <Section
+            title="Classes today"
+            state={!results.classes ? 'loading' : results.classes.ok ? 'ok' : 'error'}
+            error={results.classes?.data?.error || `HTTP ${results.classes?.status}`}
+            raw={results.classes?.data}
+          >
+            {classes.length === 0
+              ? <div style={sc.muted}>No classes found today.</div>
+              : classes.map((c, i) => (
+                  <ClassRow key={c.classUuid || i} cls={c}
+                    companyUuid={companyUuid} exerciserUuid={session.exerciserUuid}
+                    onRefresh={() => loadAll(session)}
+                  />
+                ))
+            }
+          </Section>
+        )}
 
-          {tab === 'classes' && (
-            errors.classes ? (
-              <InfoCard title="" error={errors.classes} />
-            ) : !classes ? (
-              <div style={sc.muted}>{initDone ? 'No classes data — companyUuid may not be available yet.' : 'Loading…'}</div>
-            ) : classes.length === 0 ? (
-              <div style={sc.muted}>No classes found for today.</div>
-            ) : (
-              classes.map((cls, i) => (
-                <ClassCard
-                  key={cls.classUuid || i}
-                  cls={cls}
-                  companyUuid={companyUuid}
-                  exerciserUuid={session.exerciserUuid}
-                  onBooked={() => loadAll(session)}
-                />
-              ))
-            )
-          )}
+        {tab === 'schedule' && (
+          <Section
+            title="My booked classes (next 7 days)"
+            state={!results.schedule ? 'loading' : results.schedule.ok ? 'ok' : 'error'}
+            error={results.schedule?.data?.error || `HTTP ${results.schedule?.status}`}
+            raw={results.schedule?.data}
+          >
+            {schedule.length === 0
+              ? <div style={sc.muted}>No upcoming bookings.</div>
+              : schedule.map((c, i) => (
+                  <div key={c.classUuid || i} style={sc.schedRow}>
+                    <span style={sc.schedDate}>{fmtDate(c.startDateTime || c.startDate || c.start)}</span>
+                    <span style={sc.schedTime}>{fmtTime(c.startDateTime || c.startDate || c.start)}</span>
+                    <span style={sc.schedName}>{c.className || c.name || c.title || 'Class'}</span>
+                  </div>
+                ))
+            }
+          </Section>
+        )}
 
-          {tab === 'schedule' && (
-            errors.schedule ? (
-              <InfoCard title="" error={errors.schedule} />
-            ) : !schedule ? (
-              <div style={sc.muted}>Loading…</div>
-            ) : schedule.length === 0 ? (
-              <div style={sc.muted}>No upcoming booked classes.</div>
-            ) : (
-              schedule.map((cls, i) => (
-                <div key={cls.classUuid || i} style={sc.scheduleRow}>
-                  <div style={sc.scheduleDate}>{fmtDate(cls.startDateTime || cls.startDate || cls.start)}</div>
-                  <div style={sc.scheduleTime}>{fmtTime(cls.startDateTime || cls.startDate || cls.start)}</div>
-                  <div style={sc.scheduleName}>{cls.className || cls.name || cls.title || 'Class'}</div>
-                  <span style={{ ...sc.badge, background: '#1a1f3a', color: '#818cf8' }}>Booked</span>
-                </div>
-              ))
-            )
-          )}
+        {tab === 'checkins' && (
+          <Section
+            title="Visit history (last 30 days)"
+            state={!results.checkins ? 'loading' : results.checkins.ok ? 'ok' : 'error'}
+            error={results.checkins?.data?.error || `HTTP ${results.checkins?.status}`}
+            raw={results.checkins?.data}
+          >
+            {checkins.length === 0
+              ? <div style={sc.muted}>No visits recorded.</div>
+              : (
+                <>
+                  <div style={{ color: '#4ade80', fontSize: 13, marginBottom: 12 }}>{checkins.length} visit{checkins.length !== 1 ? 's' : ''}</div>
+                  {checkins.map((c, i) => {
+                    const ts = c.checkInDateTime || c.date || c.timestamp || c.dateTime || c.checkInDate
+                    return (
+                      <div key={i} style={sc.visitRow}>
+                        <span style={sc.schedDate}>{fmtDate(ts)}</span>
+                        <span style={sc.schedTime}>{fmtTime(ts)}</span>
+                        <span style={{ color: '#666', fontSize: 13 }}>{c.clubName || c.gym?.name || c.locationName || ''}</span>
+                      </div>
+                    )
+                  })}
+                </>
+              )
+            }
+          </Section>
+        )}
 
-          {tab === 'checkins' && (
-            errors.checkins ? (
-              <InfoCard title="" error={errors.checkins} />
-            ) : !checkins ? (
-              <div style={sc.muted}>Loading…</div>
-            ) : checkins.length === 0 ? (
-              <div style={sc.muted}>No visits in the last 30 days.</div>
-            ) : (
-              <div>
-                <div style={sc.visitCount}>{checkins.length} visit{checkins.length !== 1 ? 's' : ''} in last 30 days</div>
-                {checkins.map((c, i) => {
-                  const ts = c.checkInDateTime || c.date || c.timestamp || c.dateTime
-                  const gym = c.clubName || c.gym?.name || c.locationName || ''
-                  return (
-                    <div key={i} style={sc.visitRow}>
-                      <span style={sc.visitDate}>{fmtDate(ts)}</span>
-                      <span style={sc.visitTime}>{fmtTime(ts)}</span>
-                      {gym && <span style={sc.visitGym}>{gym}</span>}
-                    </div>
-                  )
-                })}
-              </div>
-            )
-          )}
-
-          {tab === 'debug' && (
-            <div>
-              <p style={sc.muted}>Raw API responses — useful for mapping response shapes</p>
-              {Object.entries(rawData).map(([key, val]) => (
-                <div key={key} style={{ marginBottom: 20 }}>
-                  <div style={sc.debugKey}>{key}</div>
-                  <pre style={sc.rawJson}>{JSON.stringify(val, null, 2)}</pre>
-                </div>
-              ))}
-              {Object.entries(errors).filter(([, v]) => v).map(([key, msg]) => (
-                <div key={key} style={{ marginBottom: 12 }}>
-                  <div style={sc.debugKey}>{key} — ERROR</div>
-                  <div style={sc.errorText}>{msg}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
       </main>
     </div>
   )
@@ -352,142 +348,61 @@ export default function Dashboard() {
 // ─── styles ──────────────────────────────────────────────────────────────────
 
 const sc = {
-  page: {
-    minHeight: '100vh',
-    background: DARK,
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-    color: '#e5e5e5',
-  },
+  page: { minHeight: '100vh', background: DARK, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif', color: '#e5e5e5' },
   header: {
-    background: '#161616',
-    borderBottom: `2px solid ${RED}`,
-    padding: '14px 24px',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    position: 'sticky',
-    top: 0,
-    zIndex: 10,
+    background: '#161616', borderBottom: `2px solid ${RED}`, padding: '12px 24px',
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+    position: 'sticky', top: 0, zIndex: 10,
   },
-  headerInner: {},
-  brandRow: { display: 'flex', alignItems: 'center', gap: 8 },
-  brandBar: { display: 'inline-block', width: 16, height: 3, background: RED, borderRadius: 2 },
-  brandName: { color: RED, fontWeight: 800, fontSize: 12, letterSpacing: 2.5 },
-  homeClub: { color: '#888', fontSize: 13, marginTop: 2 },
-  headerRight: { display: 'flex', alignItems: 'center', gap: 14 },
-  greeting: { color: '#ccc', fontSize: 14 },
-  logoutBtn: {
-    background: 'transparent',
-    border: '1px solid #444',
-    color: '#888',
-    padding: '5px 12px',
-    borderRadius: 5,
-    cursor: 'pointer',
-    fontSize: 13,
-  },
+  brand: { color: RED, fontWeight: 800, fontSize: 12, letterSpacing: 2.5, display: 'flex', alignItems: 'center', gap: 8 },
+  brandBar: { display: 'inline-block', width: 14, height: 3, background: RED, borderRadius: 2 },
+  sub: { color: '#666', fontSize: 12, marginTop: 2 },
+  greeting: { color: '#aaa', fontSize: 13 },
+  logoutBtn: { background: 'transparent', border: '1px solid #333', color: '#666', padding: '4px 12px', borderRadius: 5, cursor: 'pointer', fontSize: 12 },
 
-  main: { maxWidth: 720, margin: '0 auto', padding: '20px 16px 60px' },
+  main: { maxWidth: 680, margin: '0 auto', padding: '16px 16px 60px' },
 
-  // busyness
-  busynessCard: {
-    background: CARD,
-    border: `1px solid ${BORDER}`,
-    borderRadius: 10,
-    padding: '18px 20px',
-    marginBottom: 16,
-  },
-  busynessTitle: { color: '#888', fontSize: 12, fontWeight: 600, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 12 },
-  busynessPct: { fontSize: 42, fontWeight: 800, color: '#fff', lineHeight: 1 },
-  busynessBar: { height: 6, background: '#2a2a2a', borderRadius: 3, margin: '12px 0 8px', overflow: 'hidden' },
-  busynessFill: { height: '100%', borderRadius: 3, transition: 'width 0.6s ease' },
-  busynessLabel: { color: '#888', fontSize: 13, marginTop: 4 },
+  // diagnostic
+  diagCard: { background: '#181818', border: `1px solid #2a2a2a`, borderRadius: 8, padding: '12px 16px', marginBottom: 12 },
+  diagSummary: { color: '#555', fontSize: 12, cursor: 'pointer', userSelect: 'none' },
+  diagGrid: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 16px', marginTop: 10 },
+  diagRow: { display: 'flex', flexDirection: 'column', gap: 2 },
+  diagKey: { color: '#555', fontSize: 10, letterSpacing: 0.5 },
+  diagVal: { fontSize: 12, wordBreak: 'break-all' },
+
+  // busyness / section
+  section: { background: CARD, border: `1px solid ${BORDER}`, borderRadius: 8, padding: '14px 16px', marginBottom: 10 },
+  sectionHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  sectionTitle: { color: '#888', fontSize: 11, fontWeight: 600, letterSpacing: 1, textTransform: 'uppercase' },
+  rawBtn: { background: 'transparent', border: '1px solid #333', color: '#555', fontSize: 10, padding: '2px 8px', borderRadius: 4, cursor: 'pointer' },
+  pctNum: { fontSize: 38, fontWeight: 800, color: '#fff', lineHeight: 1 },
+  bar: { height: 5, background: '#2a2a2a', borderRadius: 3, margin: '10px 0 6px', overflow: 'hidden' },
+  barFill: { height: '100%', borderRadius: 3, transition: 'width 0.5s ease' },
 
   // tabs
-  tabBar: { display: 'flex', gap: 4, marginBottom: 16, flexWrap: 'wrap' },
-  tabBtn: {
-    background: 'transparent',
-    border: `1px solid ${BORDER}`,
-    color: '#666',
-    padding: '7px 16px',
-    borderRadius: 6,
-    cursor: 'pointer',
-    fontSize: 13,
-    fontWeight: 500,
-  },
-  tabBtnActive: { background: CARD, color: '#fff', borderColor: '#444' },
-  tabContent: {},
+  tabBar: { display: 'flex', gap: 4, marginBottom: 10, flexWrap: 'wrap' },
+  tabBtn: { background: 'transparent', border: `1px solid ${BORDER}`, color: '#555', padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 500 },
+  tabActive: { background: CARD, color: '#ccc', borderColor: '#444' },
 
   // classes
-  classCard: {
-    background: CARD,
-    border: `1px solid ${BORDER}`,
-    borderRadius: 8,
-    padding: '13px 16px',
-    marginBottom: 8,
-  },
-  classTime: { color: '#888', fontSize: 12, fontWeight: 600, marginBottom: 4 },
-  className: { color: '#fff', fontWeight: 600, fontSize: 15, marginBottom: 2 },
-  classInstructor: { color: '#666', fontSize: 13, marginBottom: 8 },
-  classRow: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
-  badge: { fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 4 },
-  bookBtn: {
-    marginLeft: 'auto',
-    background: RED,
-    color: '#fff',
-    border: 'none',
-    borderRadius: 5,
-    padding: '5px 14px',
-    cursor: 'pointer',
-    fontSize: 13,
-    fontWeight: 600,
-  },
-  cancelBtn: { background: '#3a1c1c', color: '#f87171' },
+  classRow: { borderBottom: `1px solid ${BORDER}`, padding: '10px 0 10px 10px', marginBottom: 2 },
+  classTime: { color: '#666', fontSize: 11, fontWeight: 600, marginBottom: 3 },
+  className: { color: '#fff', fontWeight: 600, fontSize: 14 },
+  classSub: { color: '#666', fontSize: 12, marginTop: 2 },
+  badge: { fontSize: 11, fontWeight: 600, padding: '2px 7px', borderRadius: 4 },
+  bookBtn: { background: RED, color: '#fff', border: 'none', borderRadius: 5, padding: '4px 12px', cursor: 'pointer', fontSize: 12, fontWeight: 600 },
 
-  // schedule
-  scheduleRow: {
-    background: CARD,
-    border: `1px solid ${BORDER}`,
-    borderRadius: 8,
-    padding: '12px 16px',
-    marginBottom: 8,
-    display: 'flex',
-    alignItems: 'center',
-    gap: 12,
-    flexWrap: 'wrap',
-  },
-  scheduleDate: { color: '#888', fontSize: 12, minWidth: 90 },
-  scheduleTime: { color: '#888', fontSize: 12 },
-  scheduleName: { color: '#fff', fontWeight: 600, flex: 1 },
+  // schedule / visits
+  schedRow: { display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${BORDER}`, flexWrap: 'wrap' },
+  visitRow: { display: 'flex', alignItems: 'center', gap: 10, padding: '8px 0', borderBottom: `1px solid ${BORDER}`, flexWrap: 'wrap' },
+  schedDate: { color: '#aaa', fontSize: 12, minWidth: 90 },
+  schedTime: { color: '#666', fontSize: 12, minWidth: 45 },
+  schedName: { color: '#ddd', fontSize: 13, fontWeight: 500 },
 
-  // checkins
-  visitCount: { color: '#4ade80', fontSize: 13, fontWeight: 600, marginBottom: 12 },
-  visitRow: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 12,
-    padding: '10px 0',
-    borderBottom: `1px solid ${BORDER}`,
-    flexWrap: 'wrap',
-  },
-  visitDate: { color: '#ccc', fontSize: 13, minWidth: 110 },
-  visitTime: { color: '#888', fontSize: 13, minWidth: 50 },
-  visitGym: { color: '#666', fontSize: 13 },
-
-  // misc
-  infoCard: { background: CARD, border: `1px solid ${BORDER}`, borderRadius: 8, padding: '14px 16px', marginBottom: 8 },
-  cardTitle: { color: '#888', fontSize: 12, fontWeight: 600, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 8 },
-  muted: { color: '#555', fontSize: 14, padding: '20px 0' },
+  muted: { color: '#555', fontSize: 13, padding: '8px 0' },
   errorText: { color: '#f87171', fontSize: 13 },
-  debugKey: { color: '#888', fontSize: 11, fontWeight: 600, letterSpacing: 1, textTransform: 'uppercase', marginBottom: 6 },
-  rawJson: {
-    background: '#0d0d0d',
-    border: `1px solid ${BORDER}`,
-    borderRadius: 6,
-    padding: '12px 14px',
-    color: '#6ee7b7',
-    fontSize: 11,
-    overflowX: 'auto',
-    maxHeight: 400,
-    overflow: 'auto',
+  pre: {
+    background: '#0d0d0d', border: `1px solid ${BORDER}`, borderRadius: 6, padding: '10px',
+    color: '#6ee7b7', fontSize: 10, overflowX: 'auto', maxHeight: 300, overflow: 'auto', margin: '8px 0 0',
   },
 }
