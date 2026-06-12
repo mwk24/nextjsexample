@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/router'
 import Head from 'next/head'
+import Nav from '../components/Nav'
 
 const RED = '#e30613'
 const DARK = '#111'
@@ -225,20 +226,12 @@ export default function Dashboard() {
   const schedule = toArr(results.schedule?.data)
   const checkins = toArr(results.checkins?.data)
 
+  function logout() { localStorage.clear(); router.push('/') }
+
   return (
     <div style={sc.page}>
-      <Head><title>Gym Group Dashboard</title></Head>
-
-      <header style={sc.header}>
-        <div>
-          <div style={sc.brand}><span style={sc.brandBar} />THE GYM GROUP</div>
-          <div style={sc.sub}>{homeClubName}</div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-          <span style={sc.greeting}>Hi, {displayName}</span>
-          <button style={sc.logoutBtn} onClick={() => { localStorage.clear(); router.push('/') }}>Sign out</button>
-        </div>
-      </header>
+      <Head><title>Dashboard — Gym Group</title></Head>
+      <Nav name={displayName} homeClub={homeClubName} onLogout={logout} />
 
       <main style={sc.main}>
 
